@@ -22,16 +22,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: #dde1e6; }
 
 #list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
 #list li {
-  display: grid; grid-template-columns: auto 1fr 80px; gap: 8px; align-items: center;
   padding: 6px 10px; border-bottom: 1px solid var(--line); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #list li:hover { background: #252a30; }
 #list li.active { background: #263247; box-shadow: inset 3px 0 var(--accent); }
-#list input[type="range"] { width: 100%; }
-.name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* checkerboard so transparency is visible */
-#view { position: relative; background: repeating-conic-gradient(#222 0 25%, #1a1a1a 0 50%) 0 0 / 20px 20px; }
+#view { position: relative; background: var(--bg); }
 
 button {
   background: #2b3038; color: inherit; border: 1px solid #3a4049;

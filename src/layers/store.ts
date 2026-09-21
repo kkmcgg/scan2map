@@ -7,20 +7,20 @@ export interface ScanLayer {
   file: File;
   width: number;
   height: number;
-  url: string; // original, browser-displayable
-  displayUrl: string; // what the viewer shows: original or processed preview
-  visible: boolean;
-  opacity: number;
+  url: string | null; // original, browser-displayable; null until a TIFF has been decoded
+  displayUrl: string | null; // processed preview; null = show the original
   proc: ProcParams;
   palette: PaletteEntry[] | null;
 }
 
-/** list = layers replaced, props = visibility/opacity, active = selection, image = display image swapped */
-export type Change = "list" | "props" | "active" | "image";
+/** list = layers replaced, active = selection, image = an image url changed */
+export type Change = "list" | "active" | "image";
 type Listener = (change: Change, id?: string) => void;
 
+export const shownUrl = (l: ScanLayer) => l.displayUrl ?? l.url;
+
 export class LayerStore {
-  layers: ScanLayer[] = []; // index 0 = top of stack
+  layers: ScanLayer[] = [];
   activeId: string | null = null;
   private listeners = new Set<Listener>();
 
@@ -39,32 +39,27 @@ export class LayerStore {
     return this.activeId ? this.find(this.activeId) ?? null : null;
   }
 
-  set(layers: ScanLayer[]) {
+  set(layers: ScanLayer[], activeId?: string | null) {
     for (const l of this.layers) {
-      URL.revokeObjectURL(l.url);
-      if (l.displayUrl !== l.url) URL.revokeObjectURL(l.displayUrl);
+      if (l.url) URL.revokeObjectURL(l.url);
+      if (l.displayUrl) URL.revokeObjectURL(l.displayUrl);
     }
     this.layers = layers;
-    this.activeId = layers[0]?.id ?? null;
+    this.activeId = layers.find((l) => l.id === activeId)?.id ?? layers[0]?.id ?? null;
     this.emit("list");
   }
 
-  update(id: string, patch: Partial<Pick<ScanLayer, "visible" | "opacity">>) {
-    const l = this.find(id);
-    if (!l) return;
-    Object.assign(l, patch);
-    this.emit("props", id);
-  }
-
-  solo(id: string) {
-    this.layers.forEach((l) => (l.visible = l.id === id));
-    this.emit("props");
-  }
-
   setActive(id: string) {
-    if (id === this.activeId) return;
+    if (id === this.activeId || !this.find(id)) return;
     this.activeId = id;
     this.emit("active", id);
+  }
+
+  /** move the selection by delta rows, stopping at the ends */
+  step(delta: number) {
+    const i = this.layers.findIndex((l) => l.id === this.activeId);
+    const next = this.layers[Math.min(this.layers.length - 1, Math.max(0, i + delta))];
+    if (next) this.setActive(next.id);
   }
 
   setProc(id: string, patch: Partial<ProcParams>) {
@@ -72,12 +67,21 @@ export class LayerStore {
     if (l) Object.assign(l.proc, patch);
   }
 
+  /** attach the decoded original; false (and the url is revoked) if the layer is gone */
+  setUrl(id: string, url: string) {
+    const l = this.find(id);
+    if (!l || l.url) { URL.revokeObjectURL(url); return false; }
+    l.url = url;
+    this.emit("image", id);
+    return true;
+  }
+
   /** url = null reverts to the original */
   setDisplay(id: string, url: string | null, palette: PaletteEntry[] | null) {
     const l = this.find(id);
     if (!l) return;
-    if (l.displayUrl !== l.url) URL.revokeObjectURL(l.displayUrl);
-    l.displayUrl = url ?? l.url;
+    if (l.displayUrl) URL.revokeObjectURL(l.displayUrl);
+    l.displayUrl = url;
     l.palette = palette;
     this.emit("image", id);
   }

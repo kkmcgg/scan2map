@@ -1,5 +1,6 @@
-import { decode, isSupported } from "./decode";
-import type { ScanLayer } from "../layers/store";
+import { readDims, isSupported, TIFF } from "./decode";
+import { decodeWorker } from "../workers";
+import type { LayerStore, ScanLayer } from "../layers/store";
 
 export async function pickFiles(): Promise<File[]> {
   if (window.showDirectoryPicker) {
@@ -21,6 +22,7 @@ export async function pickFiles(): Promise<File[]> {
   });
 }
 
+/** Reads sizes only; TIFFs are decoded later, on demand (see ensureImage). */
 export async function loadLayers(
   files: File[],
   onProgress?: (done: number, n: number, name: string) => void,
@@ -36,15 +38,15 @@ export async function loadLayers(
       const i = next++;
       const file = files[i];
       try {
-        const d = await decode(file);
+        const { width, height } = await readDims(file);
         out[i] = {
           id: crypto.randomUUID(),
           name: file.name.replace(/\.[^.]+$/, ""),
           file,
-          ...d,
-          displayUrl: d.url,
-          visible: true,
-          opacity: 1,
+          width,
+          height,
+          url: TIFF.test(file.name) ? null : URL.createObjectURL(file),
+          displayUrl: null,
           proc: { median: 1, k: 0 },
           palette: null,
         };
@@ -57,4 +59,21 @@ export async function loadLayers(
 
   await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
   return out.filter((l): l is ScanLayer => l !== null);
+}
+
+const pending = new Map<string, Promise<void>>();
+
+/** Make sure the layer's original has a displayable url, decoding TIFFs in a worker (once). */
+export function ensureImage(store: LayerStore, l: ScanLayer): Promise<void> {
+  if (l.url) return Promise.resolve();
+  let p = pending.get(l.id);
+  if (!p) {
+    p = decodeWorker()
+      .tiffToPng(l.file)
+      .then((blob) => void store.setUrl(l.id, URL.createObjectURL(blob)))
+      .catch((e) => console.error(`couldn't decode ${l.file.name}`, e))
+      .finally(() => pending.delete(l.id));
+    pending.set(l.id, p);
+  }
+  return p;
 }

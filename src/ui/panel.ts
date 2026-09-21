@@ -1,8 +1,6 @@
 import type { LayerStore, ScanLayer } from "../layers/store";
 import { cvWorker } from "../workers";
 
-interface Row { li: HTMLLIElement; cb: HTMLInputElement; range: HTMLInputElement }
-
 export function mountPanel(root: HTMLElement, store: LayerStore, onOpen: () => void) {
   root.innerHTML = `
     <header>
@@ -11,36 +9,21 @@ export function mountPanel(root: HTMLElement, store: LayerStore, onOpen: () => v
     </header>
     <ul id="list"></ul>
     <section id="proc"></section>
-    <footer>Alt+click checkbox to solo</footer>`;
+    <footer>↑ / ↓ to switch scans</footer>`;
   const list = root.querySelector<HTMLUListElement>("#list")!;
   const proc = root.querySelector<HTMLElement>("#proc")!;
   const status = root.querySelector<HTMLSpanElement>("#status")!;
   root.querySelector<HTMLButtonElement>("#open")!.onclick = onOpen;
   const setStatus = (t: string) => (status.textContent = t);
 
-  const rows = new Map<string, Row>();
+  const rows = new Map<string, HTMLLIElement>();
 
   function row(l: ScanLayer): HTMLLIElement {
     const li = document.createElement("li");
-    li.innerHTML = `
-      <input type="checkbox" title="visible">
-      <span class="name"></span>
-      <input type="range" min="0" max="1" step="0.01" title="opacity">`;
-    const [cb, range] = li.querySelectorAll("input");
-    const name = li.querySelector<HTMLSpanElement>(".name")!;
-    name.textContent = l.name;
-    name.title = `${l.file.name} — ${l.width}×${l.height}`;
-
-    cb.onclick = (e) => {
-      if (e.altKey) { e.preventDefault(); store.solo(l.id); }
-    };
-    cb.onchange = () => store.update(l.id, { visible: cb.checked });
-    range.oninput = () => store.update(l.id, { opacity: +range.value });
-    li.onclick = (e) => {
-      if ((e.target as HTMLElement).tagName !== "INPUT") store.setActive(l.id);
-    };
-
-    rows.set(l.id, { li, cb, range });
+    li.textContent = l.name;
+    li.title = `${l.file.name} — ${l.width}×${l.height}`;
+    li.onclick = () => store.setActive(l.id);
+    rows.set(l.id, li);
     return li;
   }
 
@@ -51,13 +34,8 @@ export function mountPanel(root: HTMLElement, store: LayerStore, onOpen: () => v
   }
 
   function refresh() {
-    for (const l of store.layers) {
-      const r = rows.get(l.id);
-      if (!r) continue;
-      r.li.classList.toggle("active", l.id === store.activeId);
-      r.cb.checked = l.visible;
-      if (document.activeElement !== r.range) r.range.value = String(l.opacity);
-    }
+    for (const [id, li] of rows) li.classList.toggle("active", id === store.activeId);
+    rows.get(store.activeId ?? "")?.scrollIntoView({ block: "nearest" });
   }
 
   function renderProc() {
@@ -106,8 +84,7 @@ export function mountPanel(root: HTMLElement, store: LayerStore, onOpen: () => v
   store.subscribe((c, id) => {
     if (c === "list") { render(); renderProc(); }
     else if (c === "active") { refresh(); renderProc(); }
-    else if (c === "image") { if (id === store.activeId) renderProc(); }
-    else refresh();
+    else if (id === store.activeId) renderProc();
   });
 
   return { setStatus };

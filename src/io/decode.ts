@@ -1,24 +1,20 @@
 import { fromBlob } from "geotiff";
 
 const RASTER = /\.(png|jpe?g|webp|bmp|gif)$/i;
-const TIFF = /\.tiff?$/i;
+export const TIFF = /\.tiff?$/i;
 
 export const isSupported = (name: string) => RASTER.test(name) || TIFF.test(name);
 
-export interface Decoded { width: number; height: number; url: string }
-
-export async function decode(file: File): Promise<Decoded> {
+/** Cheap: TIFFs only read their header; rasters are decoded once by the browser. */
+export async function readDims(file: File): Promise<{ width: number; height: number }> {
   if (TIFF.test(file.name)) {
-    const img = await tiffToImageData(file);
-    const c = new OffscreenCanvas(img.width, img.height);
-    c.getContext("2d")!.putImageData(img, 0, 0);
-    const blob = await c.convertToBlob({ type: "image/png" });
-    return { width: img.width, height: img.height, url: URL.createObjectURL(blob) };
+    const img = await (await fromBlob(file)).getImage();
+    return { width: img.getWidth(), height: img.getHeight() };
   }
   const bmp = await createImageBitmap(file);
   const { width, height } = bmp;
   bmp.close();
-  return { width, height, url: URL.createObjectURL(file) };
+  return { width, height };
 }
 
 export async function tiffToImageData(file: File): Promise<ImageData> {
