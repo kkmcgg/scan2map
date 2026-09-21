@@ -1,14 +1,31 @@
 import "ol/ol.css";
-import Map from "ol/Map";
-import View from "ol/View";
-import TileLayer from "ol/layer/Tile";
-import OSM from "ol/source/OSM";
+import "./style.css";
+import { LayerStore } from "./layers/store";
+import { pickFiles, loadLayers } from "./io/load";
+import { ScanView } from "./view/scanView";
+import { mountPanel } from "./ui/panel";
+import { cvWorker, gdalWorker, cvWorkerIfStarted } from "./workers";
 
-const el = document.getElementById("app")!;
-el.style.cssText = "position:fixed;inset:0";
+const app = document.getElementById("app")!;
+app.innerHTML = `<aside id="panel"></aside><main id="view"></main>`;
 
-new Map({
-  target: el,
-  layers: [new TileLayer({ source: new OSM() })],
-  view: new View({ center: [-7300000, 5600000], zoom: 7 }),
+const store = new LayerStore();
+new ScanView(document.getElementById("view")!, store);
+
+const panel = mountPanel(document.getElementById("panel")!, store, async () => {
+  try {
+    const files = await pickFiles();
+    if (!files.length) return;
+    const layers = await loadLayers(files, (d, n, name) => panel.setStatus(`loading ${d}/${n}: ${name}`));
+    store.set(layers);
+    cvWorkerIfStarted()?.clear();
+    panel.setStatus(`${layers.length} layer${layers.length === 1 ? "" : "s"}`);
+  } catch (e) {
+    if ((e as DOMException).name === "AbortError") return;
+    console.error(e);
+    panel.setStatus("load failed — see console");
+  }
 });
+
+// dev handle for the console
+Object.assign(window, { s2m: { store, cv: cvWorker, gdal: gdalWorker } });

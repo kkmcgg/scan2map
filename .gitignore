@@ -4,3 +4,4 @@ dist/
 *.tif
 *.tiff
 samples/
+public/gdal/

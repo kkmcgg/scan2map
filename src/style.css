@@ -1,0 +1,50 @@
+:root {
+  color-scheme: dark;
+  font: 13px/1.4 system-ui, sans-serif;
+  --bg: #16181b;
+  --panel: #1f2226;
+  --line: #2d3136;
+  --accent: #4c8dff;
+  --muted: #8b929a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: #dde1e6; }
+
+#app { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
+
+#panel {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--panel); border-right: 1px solid var(--line);
+}
+#panel header { display: flex; gap: 8px; align-items: center; padding: 10px; border-bottom: 1px solid var(--line); }
+#panel footer { padding: 6px 10px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
+#status { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+#list li {
+  display: grid; grid-template-columns: auto 1fr 80px; gap: 8px; align-items: center;
+  padding: 6px 10px; border-bottom: 1px solid var(--line); cursor: pointer;
+}
+#list li:hover { background: #252a30; }
+#list li.active { background: #263247; box-shadow: inset 3px 0 var(--accent); }
+#list input[type="range"] { width: 100%; }
+.name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* checkerboard so transparency is visible */
+#view { position: relative; background: repeating-conic-gradient(#222 0 25%, #1a1a1a 0 50%) 0 0 / 20px 20px; }
+
+button {
+  background: #2b3038; color: inherit; border: 1px solid #3a4049;
+  padding: 5px 10px; border-radius: 4px; cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+
+#proc { display: grid; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
+#proc:empty { display: none; }
+#proc h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#proc label { display: flex; justify-content: space-between; align-items: center; }
+#proc input[type="number"] { width: 64px; background: #15171a; color: inherit; border: 1px solid #3a4049; border-radius: 4px; padding: 3px 6px; }
+#proc .buttons { display: flex; gap: 6px; }
+#palette { display: flex; flex-wrap: wrap; gap: 4px; }
+.swatch { width: 22px; height: 22px; border-radius: 3px; border: 1px solid #0006; }
+button:disabled { opacity: 0.5; cursor: wait; }
