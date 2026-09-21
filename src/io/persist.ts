@@ -1,5 +1,5 @@
 import { TIFF } from "./decode";
-import type { Group, LayerStore, PaletteEntry, ProcParams, ScanLayer } from "../layers/store";
+import type { Gcp, Group, LayerStore, PaletteEntry, ProcParams, ScanLayer } from "../layers/store";
 import type OlMap from "ol/Map";
 
 /**
@@ -20,6 +20,8 @@ interface LayerMeta {
   height: number;
   groupId: string;
   order: number;
+  hidden: boolean;
+  gcps: Gcp[];
   applied: ProcParams | null;
   palette: PaletteEntry[] | null;
 }
@@ -63,7 +65,7 @@ export async function restore(): Promise<Restored | null> {
   const [files, base, display, meta] = STORES.map((s) => tx.objectStore(s));
   const session = await get<Session>(meta, "session");
   if (!session?.layers.length) return null;
-  if (!session.groups?.length) { await clearAll(); return null; } // written by an older version
+  if (!session.groups?.length || session.layers.some((l) => !l.gcps)) { await clearAll(); return null; } // an older layout
 
   const layers: ScanLayer[] = [];
   for (const m of session.layers) {
@@ -125,8 +127,8 @@ async function save(store: LayerStore, map: OlMap) {
   const c = v.getCenter();
   const res = v.getResolution();
   const session: Session = {
-    layers: layers.map(({ id, name, width, height, groupId, order, applied, palette }) => ({
-      id, name, width, height, groupId, order, applied: applied && { ...applied }, palette,
+    layers: layers.map(({ id, name, width, height, groupId, order, hidden, gcps, applied, palette }) => ({
+      id, name, width, height, groupId, order, hidden, gcps: structuredClone(gcps), applied: applied && { ...applied }, palette,
     })),
     groups: structuredClone(store.groups),
     activeId: store.activeId,

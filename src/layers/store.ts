@@ -4,12 +4,26 @@ export interface PaletteEntry { rgb: [number, number, number]; share: number }
 export type Method = "poly1" | "poly2" | "poly3" | "tps";
 export const MIN_GCPS: Record<Method, number> = { poly1: 3, poly2: 6, poly3: 10, tps: 3 };
 
-/** col/row are pixel/line in the scan, (0,0) = top-left corner; x/y are in the group's GCP CRS (null until typed) */
+/** col/row are pixel/line in the layer, (0,0) = top-left corner; x/y are in the group's GCP CRS (null until known) */
 export interface Gcp { id: string; col: number; row: number; x: number | null; y: number | null }
-export interface Georef { srcSrs: string; dstSrs: string; method: Method; gcps: Gcp[] }
 
-/** Scans in a group share one processing chain and one georeferencing. */
-export interface Group { id: string; name: string; proc: ProcParams; georef: Georef }
+/** Where one scan sits inside a stitched mosaic image. */
+export interface Cell { id: string; x: number; y: number; w: number; h: number }
+export interface Mosaic { layerId: string; cols: number; cells: Cell[] }
+
+/**
+ * A group shares one processing chain and one CRS/warp method. GCPs belong to each layer.
+ * A collapsed group hides its scans and shows one stitched mosaic layer instead.
+ */
+export interface Group {
+  id: string;
+  name: string;
+  proc: ProcParams;
+  srcSrs: string; // CRS of the GCP x/y
+  dstSrs: string; // output CRS
+  method: Method;
+  mosaic: Mosaic | null;
+}
 
 export interface ScanLayer {
   id: string;
@@ -19,6 +33,8 @@ export interface ScanLayer {
   height: number;
   groupId: string;
   order: number; // position in the folder listing, so ungrouping restores name order
+  hidden: boolean; // a scan folded into its group's mosaic
+  gcps: Gcp[];
   url: string | null; // original, browser-displayable; null until a TIFF has been decoded
   displayUrl: string | null; // processed preview; null = show the original
   applied: ProcParams | null; // the chain displayUrl was made with
@@ -26,29 +42,31 @@ export interface ScanLayer {
 }
 
 /**
- * list = layers/groups replaced, groups = membership or names changed, active/select = selection,
- * image = an image url changed, settings = a group's chain or georef changed (id = group)
+ * list = layers/groups replaced, groups = membership/names/mosaics changed (id = a new group to name),
+ * active/select = selection, image = an image url changed, settings = a group's chain/CRS/method changed (id = group),
+ * gcps = a layer's control points changed (id = layer)
  */
-export type Change = "list" | "groups" | "active" | "select" | "image" | "settings";
+export type Change = "list" | "groups" | "active" | "select" | "image" | "settings" | "gcps";
 type Listener = (change: Change, id?: string) => void;
 
 export const shownUrl = (l: ScanLayer) => l.displayUrl ?? l.url;
 export const sameProc = (a: ProcParams, b: ProcParams) => a.median === b.median && a.k === b.k;
-export const completeGcps = (g: Group) => g.georef.gcps.filter((p) => p.x !== null && p.y !== null);
+export const completeGcps = (l: ScanLayer) => l.gcps.filter((p) => p.x !== null && p.y !== null);
 
 export function newGroup(name: string, from?: Group): Group {
   return {
     id: crypto.randomUUID(),
     name,
     proc: from ? { ...from.proc } : { median: 1, k: 0 },
-    georef: from
-      ? { ...from.georef, gcps: from.georef.gcps.map((p) => ({ ...p, id: crypto.randomUUID() })) }
-      : { srcSrs: "EPSG:2961", dstSrs: "EPSG:2961", method: "poly1", gcps: [] },
+    srcSrs: from?.srcSrs ?? "EPSG:2961",
+    dstSrs: from?.dstSrs ?? "EPSG:2961",
+    method: from?.method ?? "poly1",
+    mosaic: null,
   };
 }
 
 export class LayerStore {
-  layers: ScanLayer[] = []; // kept in display order: by group, then folder order
+  layers: ScanLayer[] = []; // every layer (including folded ones), by group then folder order
   groups: Group[] = [];
   activeId: string | null = null;
   selected = new Set<string>();
@@ -68,8 +86,16 @@ export class LayerStore {
   group(id: string) {
     return this.groups.find((g) => g.id === id);
   }
+
+  /** what the list shows and the arrow keys walk: everything not folded into a mosaic */
+  get shown() {
+    return this.layers.filter((l) => !l.hidden);
+  }
   members(groupId: string) {
-    return this.layers.filter((l) => l.groupId === groupId);
+    return this.shown.filter((l) => l.groupId === groupId);
+  }
+  isMosaic(l: ScanLayer) {
+    return this.groups.some((g) => g.mosaic?.layerId === l.id);
   }
 
   get active() {
@@ -89,7 +115,7 @@ export class LayerStore {
     this.groups = groups;
     this.groupSeq = groups.length;
     this.regroup();
-    this.activeId = this.layers.find((l) => l.id === activeId)?.id ?? this.layers[0]?.id ?? null;
+    this.activeId = this.shown.find((l) => l.id === activeId)?.id ?? this.shown[0]?.id ?? null;
     this.selected = new Set(this.activeId ? [this.activeId] : []);
     this.emit("list");
   }
@@ -103,7 +129,7 @@ export class LayerStore {
 
   /** only = just this one; toggle = ctrl-click; range = shift-click from the active scan */
   select(id: string, mode: "only" | "toggle" | "range" = "only") {
-    if (!this.find(id)) return;
+    if (!this.shown.some((l) => l.id === id)) return;
     const was = this.activeId;
     if (mode === "toggle" && this.selected.has(id) && this.selected.size > 1) {
       this.selected.delete(id);
@@ -112,9 +138,10 @@ export class LayerStore {
       this.selected.add(id);
       this.activeId = id;
     } else if (mode === "range" && this.activeId) {
-      const a = this.layers.findIndex((l) => l.id === this.activeId);
-      const b = this.layers.findIndex((l) => l.id === id);
-      this.selected = new Set(this.layers.slice(Math.min(a, b), Math.max(a, b) + 1).map((l) => l.id));
+      const shown = this.shown;
+      const a = shown.findIndex((l) => l.id === this.activeId);
+      const b = shown.findIndex((l) => l.id === id);
+      this.selected = new Set(shown.slice(Math.min(a, b), Math.max(a, b) + 1).map((l) => l.id));
       this.activeId = id;
     } else {
       this.selected = new Set([id]);
@@ -140,8 +167,9 @@ export class LayerStore {
 
   /** move the selection by delta rows, stopping at the ends */
   step(delta: number) {
-    const i = this.layers.findIndex((l) => l.id === this.activeId);
-    const next = this.layers[Math.min(this.layers.length - 1, Math.max(0, i + delta))];
+    const shown = this.shown;
+    const i = shown.findIndex((l) => l.id === this.activeId);
+    const next = shown[Math.min(shown.length - 1, Math.max(0, i + delta))];
     if (next) this.setActive(next.id);
   }
 
@@ -149,18 +177,18 @@ export class LayerStore {
 
   /** new group (starts as a copy of the first selected scan's group) holding the selected scans */
   groupSelected() {
-    const moving = this.layers.filter((l) => this.selected.has(l.id));
+    const moving = this.shown.filter((l) => this.selected.has(l.id) && !this.isMosaic(l));
     if (!moving.length) return;
     const src = this.group(moving[0].groupId)!;
     const g = newGroup(`Group ${++this.groupSeq}`, src);
     this.groups.splice(this.groups.indexOf(src) + 1, 0, g);
     moving.forEach((l) => (l.groupId = g.id));
-    this.afterRegroup();
+    this.afterRegroup(g.id);
   }
 
   /** every selected scan gets its own group */
   ungroupSelected() {
-    for (const l of this.layers.filter((l) => this.selected.has(l.id))) {
+    for (const l of this.shown.filter((l) => this.selected.has(l.id) && !this.isMosaic(l))) {
       const src = this.group(l.groupId)!;
       if (this.members(src.id).length === 1) continue;
       const g = newGroup(`Group ${++this.groupSeq}`, src);
@@ -170,16 +198,71 @@ export class LayerStore {
     this.afterRegroup();
   }
 
-  private afterRegroup() {
+  private afterRegroup(newGroupId?: string) {
     this.groups = this.groups.filter((g) => this.layers.some((l) => l.groupId === g.id));
     this.regroup();
-    this.emit("groups");
+    this.emit("groups", newGroupId);
   }
 
   renameGroup(id: string, name: string) {
     const g = this.group(id);
     if (!g || !name.trim()) return;
     g.name = name.trim();
+    this.emit("groups");
+  }
+
+  // ---- mosaics ----
+
+  /** hide the group's scans behind one stitched layer; their GCPs move onto it (shifted into mosaic pixels) */
+  collapseGroup(groupId: string, mosaic: ScanLayer, cells: Cell[], cols: number) {
+    const g = this.group(groupId);
+    if (!g || g.mosaic) return;
+    const at = new Map(cells.map((c) => [c.id, c]));
+    let order = Infinity;
+    for (const l of this.layers) {
+      const c = at.get(l.id);
+      if (!c) continue;
+      mosaic.gcps.push(...l.gcps.map((p) => ({ ...p, col: p.col + c.x, row: p.row + c.y })));
+      l.gcps = [];
+      l.hidden = true;
+      order = Math.min(order, l.order);
+    }
+    mosaic.groupId = groupId;
+    mosaic.order = order;
+    this.layers.push(mosaic);
+    g.mosaic = { layerId: mosaic.id, cols, cells };
+    this.regroup();
+    this.activeId = mosaic.id;
+    this.selected = new Set([mosaic.id]);
+    this.emit("groups");
+  }
+
+  /** drop the mosaic and bring the scans back; GCPs go back to the scan they fall in */
+  expandGroup(groupId: string) {
+    const g = this.group(groupId);
+    const m = g?.mosaic;
+    if (!g || !m) return;
+    const ml = this.find(m.layerId);
+    if (ml) {
+      for (const p of ml.gcps) {
+        const c = m.cells.find((c) => p.col >= c.x && p.col < c.x + c.w && p.row >= c.y && p.row < c.y + c.h);
+        const l = c && this.find(c.id);
+        if (!c || !l) continue;
+        const col = p.col - c.x;
+        const row = p.row - c.y;
+        if (col < l.width && row < l.height) l.gcps.push({ ...p, col, row });
+      }
+      if (ml.url) URL.revokeObjectURL(ml.url);
+      if (ml.displayUrl) URL.revokeObjectURL(ml.displayUrl);
+      this.layers = this.layers.filter((l) => l !== ml);
+    }
+    for (const c of m.cells) {
+      const l = this.find(c.id);
+      if (l) l.hidden = false;
+    }
+    g.mosaic = null;
+    this.activeId = this.members(groupId)[0]?.id ?? this.shown[0]?.id ?? null;
+    this.selected = new Set(this.activeId ? [this.activeId] : []);
     this.emit("groups");
   }
 
@@ -192,32 +275,36 @@ export class LayerStore {
     this.emit("settings", groupId);
   }
 
-  setGeoref(groupId: string, patch: Partial<Pick<Georef, "srcSrs" | "dstSrs" | "method">>) {
+  setGeoref(groupId: string, patch: Partial<Pick<Group, "srcSrs" | "dstSrs" | "method">>) {
     const g = this.group(groupId);
     if (!g) return;
-    Object.assign(g.georef, patch);
+    Object.assign(g, patch);
     this.emit("settings", groupId);
   }
 
-  addGcp(groupId: string, p: { col: number; row: number }) {
-    const g = this.group(groupId);
-    if (!g) return;
-    g.georef.gcps.push({ id: crypto.randomUUID(), col: p.col, row: p.row, x: null, y: null });
-    this.emit("settings", groupId);
+  // ---- control points (per layer) ----
+
+  addGcp(layerId: string, p: { col: number; row: number; x?: number; y?: number }) {
+    const l = this.find(layerId);
+    if (!l) return null;
+    const id = crypto.randomUUID();
+    l.gcps.push({ id, col: p.col, row: p.row, x: p.x ?? null, y: p.y ?? null });
+    this.emit("gcps", layerId);
+    return id;
   }
 
-  updateGcp(groupId: string, id: string, patch: Partial<Omit<Gcp, "id">>) {
-    const p = this.group(groupId)?.georef.gcps.find((p) => p.id === id);
+  updateGcp(layerId: string, id: string, patch: Partial<Omit<Gcp, "id">>) {
+    const p = this.find(layerId)?.gcps.find((p) => p.id === id);
     if (!p) return;
     Object.assign(p, patch);
-    this.emit("settings", groupId);
+    this.emit("gcps", layerId);
   }
 
-  removeGcp(groupId: string, id: string) {
-    const g = this.group(groupId);
-    if (!g) return;
-    g.georef.gcps = g.georef.gcps.filter((p) => p.id !== id);
-    this.emit("settings", groupId);
+  removeGcp(layerId: string, id: string) {
+    const l = this.find(layerId);
+    if (!l) return;
+    l.gcps = l.gcps.filter((p) => p.id !== id);
+    this.emit("gcps", layerId);
   }
 
   // ---- images ----

@@ -7,42 +7,75 @@ import { Style, Circle as CircleStyle, Fill, Stroke, Text } from "ol/style";
 import type { LayerStore } from "../layers/store";
 import type { ScanView } from "./scanView";
 
-/** Draws the active group's GCPs on the map; click to add in "add" mode, drag to move. */
+/** Point style shared by the scan and the reference map: orange = no world position yet, green = paired, blue = waiting. */
+export function gcpStyle(f: FeatureLike, selectedId: string | null, pendingId: string | null) {
+  const id = f.getId();
+  const sel = id === selectedId;
+  const color = id === pendingId ? "#4c8dff" : f.get("ok") ? "#3ecf8e" : "#ffb020";
+  return new Style({
+    image: new CircleStyle({
+      radius: sel || id === pendingId ? 10 : 8,
+      fill: new Fill({ color: color + "cc" }),
+      stroke: new Stroke({ color: "#fff", width: sel ? 3 : 2 }),
+    }),
+    text: new Text({ text: String(f.get("n")), font: "bold 11px system-ui, sans-serif", fill: new Fill({ color: "#111" }) }),
+  });
+}
+
+/**
+ * Places and moves the active layer's GCPs on the scan.
+ * Workflow: click the scan (a point is created and becomes "pending"), then click the matching place
+ * on the reference map, which fills in its world coordinates.
+ */
 export class GcpEditor {
   adding = false;
-  onMode?: (adding: boolean) => void;
+  selectedId: string | null = null;
+  pendingId: string | null = null;
+  private watchers = new Set<() => void>();
   private source = new VectorSource<Feature<Point>>();
-  private selectedId: string | null = null;
 
   constructor(private view: ScanView, private store: LayerStore) {
     const map = view.map;
-    const layer = new VectorLayer({ source: this.source, zIndex: 10, style: (f) => this.style(f) });
+    const layer = new VectorLayer({ source: this.source, zIndex: 10, style: (f) => gcpStyle(f, this.selectedId, this.pendingId) });
     map.addLayer(layer);
 
     const translate = new Translate({ layers: [layer] });
     map.addInteraction(translate);
     translate.on("translateend", (e) => {
-      const g = store.activeGroup;
-      if (!g) return;
+      const l = store.active;
+      if (!l) return;
       for (const f of e.features.getArray() as Feature<Point>[]) {
         const [px, py] = f.getGeometry()!.getCoordinates();
-        store.updateGcp(g.id, f.getId() as string, { col: px, row: view.stackH - py });
+        store.updateGcp(l.id, f.getId() as string, { col: px, row: view.stackH - py });
       }
     });
 
     map.on("singleclick", (e) => {
-      const g = store.activeGroup;
-      if (!this.adding || !g) return;
-      store.addGcp(g.id, { col: e.coordinate[0], row: view.stackH - e.coordinate[1] });
+      const l = store.active;
+      if (!this.adding || !l) return;
+      const id = store.addGcp(l.id, { col: e.coordinate[0], row: view.stackH - e.coordinate[1] });
+      if (id) this.setPending(id);
     });
 
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") this.setAdding(false);
+      if (e.key !== "Escape") return;
+      this.setAdding(false);
+      this.setPending(null);
     });
 
     store.subscribe((c) => {
-      if (c === "list" || c === "active" || c === "groups" || c === "settings") this.sync();
+      if (c === "active" || c === "list" || c === "groups") this.setPending(null);
+      if (c === "list" || c === "active" || c === "groups" || c === "gcps") this.sync();
     });
+  }
+
+  /** be told when mode/selection/pending change (for the panel and the reference map) */
+  watch(fn: () => void) {
+    this.watchers.add(fn);
+  }
+  private notify() {
+    this.source.changed();
+    this.watchers.forEach((fn) => fn());
   }
 
   setAdding(on: boolean) {
@@ -50,39 +83,36 @@ export class GcpEditor {
     this.adding = on;
     const el = this.view.map.getTargetElement();
     if (el) el.style.cursor = on ? "crosshair" : "";
-    this.onMode?.(on);
+    this.notify();
   }
 
-  /** highlight a GCP and bring it into view */
+  /** the point that the next click on the reference map will position */
+  setPending(id: string | null) {
+    if (id === this.pendingId) return;
+    this.pendingId = id;
+    this.notify();
+  }
+
+  /** highlight a GCP and bring it into view on the scan */
   focus(id: string) {
     this.selectedId = id;
-    this.source.changed();
     const f = this.source.getFeatureById(id);
     if (f) this.view.map.getView().animate({ center: f.getGeometry()!.getCoordinates(), duration: 200 });
+    this.notify();
   }
 
   private sync() {
-    const g = this.store.activeGroup;
+    const l = this.store.active;
     this.source.clear();
-    if (!g) return;
-    this.source.addFeatures(
-      g.georef.gcps.map((p, i) => {
-        const f = new Feature({ geometry: new Point([p.col, this.view.stackH - p.row]), n: i + 1, ok: p.x !== null && p.y !== null });
-        f.setId(p.id);
-        return f;
-      }),
-    );
-  }
-
-  private style(f: FeatureLike) {
-    const sel = f.getId() === this.selectedId;
-    return new Style({
-      image: new CircleStyle({
-        radius: sel ? 10 : 8,
-        fill: new Fill({ color: f.get("ok") ? "#3ecf8ecc" : "#ffb020cc" }), // green once it has coordinates
-        stroke: new Stroke({ color: "#fff", width: sel ? 3 : 2 }),
-      }),
-      text: new Text({ text: String(f.get("n")), font: "bold 11px system-ui, sans-serif", fill: new Fill({ color: "#111" }) }),
-    });
+    if (l) {
+      this.source.addFeatures(
+        l.gcps.map((p, i) => {
+          const f = new Feature({ geometry: new Point([p.col, this.view.stackH - p.row]), n: i + 1, ok: p.x !== null && p.y !== null });
+          f.setId(p.id);
+          return f;
+        }),
+      );
+    }
+    this.notify();
   }
 }

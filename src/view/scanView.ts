@@ -12,6 +12,7 @@ export class ScanView {
   readonly map: OlMap;
   private layer = new ImageLayer<Static>();
   private projection: Projection | null = null;
+  private stackW = 0;
   stackH = 0; // tallest scan; a scan pixel row r sits at map y = stackH - r
   private shown = ""; // id|url of what the layer currently holds
 
@@ -24,16 +25,26 @@ export class ScanView {
     });
     store.subscribe((c, id) => {
       if (c === "list") this.rebuild();
+      else if (c === "groups") this.reextent();
       else if (c === "active" || (c === "image" && id === store.activeId)) this.show();
     });
   }
 
-  private rebuild() {
-    const { layers } = this.store;
-    this.shown = "";
-    if (!layers.length) { this.layer.setSource(null); return; }
+  /** a mosaic can be bigger than any scan: rebuild only when the shared extent actually changes */
+  private reextent() {
+    const layers = this.store.shown;
+    const w = Math.max(0, ...layers.map((l) => l.width));
+    const h = Math.max(0, ...layers.map((l) => l.height));
+    if (w !== this.stackW || h !== this.stackH) this.rebuild();
+    else this.show();
+  }
 
-    const w = Math.max(...layers.map((l) => l.width));
+  private rebuild() {
+    const layers = this.store.shown;
+    this.shown = "";
+    if (!layers.length) { this.layer.setSource(null); this.stackW = this.stackH = 0; return; }
+
+    const w = (this.stackW = Math.max(...layers.map((l) => l.width)));
     this.stackH = Math.max(...layers.map((l) => l.height));
     const extent = [0, 0, w, this.stackH];
     this.projection = new Projection({ code: "scan-px", units: "pixels", extent });

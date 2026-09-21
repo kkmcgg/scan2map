@@ -5,18 +5,21 @@ import { pickFiles, loadLayers, ensureImage } from "./io/load";
 import { restore, autosave } from "./io/persist";
 import { ScanView } from "./view/scanView";
 import { GcpEditor } from "./view/gcpEditor";
+import { RefMap } from "./view/refMap";
 import { mountPanel } from "./ui/panel";
 import { cvWorker, gdalWorker, cvWorkerIfStarted } from "./workers";
 
 const app = document.getElementById("app")!;
-app.innerHTML = `<aside id="panel"></aside><main id="view"></main>`;
+app.innerHTML = `<aside id="panel"></aside><main id="stage"><div id="view"></div><div id="ref"></div></main>`;
 
 const store = new LayerStore();
 const scanView = new ScanView(document.getElementById("view")!, store);
 
 const gcpEditor = new GcpEditor(scanView, store);
+const refMap = new RefMap(document.getElementById("ref")!, store, gcpEditor);
+refMap.onLayout = () => scanView.map.updateSize();
 
-const panel = mountPanel(document.getElementById("panel")!, store, gcpEditor, async () => {
+const panel = mountPanel(document.getElementById("panel")!, store, gcpEditor, refMap, async () => {
   try {
     const files = await pickFiles();
     if (!files.length) return;
@@ -52,15 +55,16 @@ const panel = mountPanel(document.getElementById("panel")!, store, gcpEditor, as
 
 // decode the active scan (TIFFs are lazy) and its neighbours so switching is instant
 store.subscribe((c) => {
-  if (c !== "list" && c !== "active") return;
-  const i = store.layers.findIndex((l) => l.id === store.activeId);
-  const l = store.layers[i];
+  if (c !== "list" && c !== "active" && c !== "groups") return;
+  const shown = store.shown;
+  const i = shown.findIndex((l) => l.id === store.activeId);
+  const l = shown[i];
   if (!l) return;
   if (!l.url) {
     panel.setStatus(`decoding ${l.name}…`);
     ensureImage(store, l).then(() => store.activeId === l.id && panel.setStatus(""));
   }
-  for (const n of [store.layers[i + 1], store.layers[i - 1]]) if (n) ensureImage(store, n);
+  for (const n of [shown[i + 1], shown[i - 1]]) if (n) ensureImage(store, n);
 });
 
 window.addEventListener("keydown", (e) => {
