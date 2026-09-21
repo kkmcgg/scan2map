@@ -12,7 +12,7 @@ export class ScanView {
   readonly map: OlMap;
   private layer = new ImageLayer<Static>();
   private projection: Projection | null = null;
-  private stackH = 0;
+  stackH = 0; // tallest scan; a scan pixel row r sits at map y = stackH - r
   private shown = ""; // id|url of what the layer currently holds
 
   constructor(target: HTMLElement, private store: LayerStore) {

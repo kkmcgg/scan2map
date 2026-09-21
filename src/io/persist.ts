@@ -1,5 +1,5 @@
 import { TIFF } from "./decode";
-import type { LayerStore, PaletteEntry, ProcParams, ScanLayer } from "../layers/store";
+import type { Group, LayerStore, PaletteEntry, ProcParams, ScanLayer } from "../layers/store";
 import type OlMap from "ol/Map";
 
 /**
@@ -18,13 +18,15 @@ interface LayerMeta {
   name: string;
   width: number;
   height: number;
-  proc: ProcParams;
+  groupId: string;
+  order: number;
+  applied: ProcParams | null;
   palette: PaletteEntry[] | null;
 }
 interface ViewMeta { center: [number, number]; resolution: number }
-interface Session { layers: LayerMeta[]; activeId: string | null; view: ViewMeta | null }
+interface Session { layers: LayerMeta[]; groups: Group[]; activeId: string | null; view: ViewMeta | null }
 
-export interface Restored { layers: ScanLayer[]; activeId: string | null; view: ViewMeta | null }
+export interface Restored { layers: ScanLayer[]; groups: Group[]; activeId: string | null; view: ViewMeta | null }
 
 let dbP: Promise<IDBDatabase> | null = null;
 const openDb = () =>
@@ -61,6 +63,7 @@ export async function restore(): Promise<Restored | null> {
   const [files, base, display, meta] = STORES.map((s) => tx.objectStore(s));
   const session = await get<Session>(meta, "session");
   if (!session?.layers.length) return null;
+  if (!session.groups?.length) { await clearAll(); return null; } // written by an older version
 
   const layers: ScanLayer[] = [];
   for (const m of session.layers) {
@@ -74,9 +77,15 @@ export async function restore(): Promise<Restored | null> {
     saved.files.add(m.id);
     if (baseBlob) saved.base.add(m.id);
     if (displayUrl) saved.display.set(m.id, displayUrl);
-    layers.push({ id: m.id, name: m.name, width: m.width, height: m.height, proc: m.proc, palette: m.palette, file, url, displayUrl });
+    layers.push({ ...m, file, url, displayUrl });
   }
-  return layers.length ? { layers, activeId: session.activeId, view: session.view } : null;
+  return layers.length ? { layers, groups: session.groups, activeId: session.activeId, view: session.view } : null;
+}
+
+async function clearAll() {
+  const tx = (await openDb()).transaction([...STORES], "readwrite");
+  STORES.forEach((s) => tx.objectStore(s).clear());
+  await done(tx);
 }
 
 /** null if the object url was revoked in the meantime; the next change re-triggers the save */
@@ -116,9 +125,10 @@ async function save(store: LayerStore, map: OlMap) {
   const c = v.getCenter();
   const res = v.getResolution();
   const session: Session = {
-    layers: layers.map(({ id, name, width, height, proc, palette }) => ({
-      id, name, width, height, proc: { ...proc }, palette,
+    layers: layers.map(({ id, name, width, height, groupId, order, applied, palette }) => ({
+      id, name, width, height, groupId, order, applied: applied && { ...applied }, palette,
     })),
+    groups: structuredClone(store.groups),
     activeId: store.activeId,
     view: c && res ? { center: [c[0], c[1]], resolution: res } : null,
   };

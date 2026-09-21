@@ -1,5 +1,6 @@
 import * as Comlink from "comlink";
 import initGdalJs from "gdal3.js";
+import { MIN_GCPS } from "../layers/store";
 
 // gdal3.js installs its own worker message handler when loaded in a worker; we talk via Comlink instead
 self.onmessage = null;
@@ -24,7 +25,6 @@ export interface WarpOptions {
   nodata: number;
 }
 
-const MIN_GCPS = { poly1: 3, poly2: 6, poly3: 10, tps: 3 } as const;
 
 // raw float32 + ENVI header is the simplest reliable way to hand GDAL a typed array
 const enviHeader = (w: number, h: number) =>

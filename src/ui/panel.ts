@@ -1,90 +1,106 @@
-import type { LayerStore, ScanLayer } from "../layers/store";
-import { cvWorker } from "../workers";
+import { sameProc, completeGcps, type Change, type Group, type LayerStore, type ScanLayer } from "../layers/store";
+import type { GcpEditor } from "../view/gcpEditor";
+import { mountProc } from "./procSection";
+import { mountGeoref } from "./georefSection";
 
-export function mountPanel(root: HTMLElement, store: LayerStore, onOpen: () => void) {
+export function mountPanel(root: HTMLElement, store: LayerStore, editor: GcpEditor, onOpen: () => void) {
   root.innerHTML = `
     <header>
       <button id="open">Open folder…</button>
       <span id="status"></span>
     </header>
+    <div id="tools">
+      <button id="group" title="Move the selected scans into a new group">Group</button>
+      <button id="ungroup" title="Give each selected scan its own group">Ungroup</button>
+    </div>
     <ul id="list"></ul>
-    <section id="proc"></section>
-    <footer>↑ / ↓ to switch scans</footer>`;
+    <div id="lower"><section id="proc"></section><section id="georef"></section></div>
+    <footer>↑/↓ switch · click a group to select it · Shift/Ctrl-click to multi-select</footer>`;
   const list = root.querySelector<HTMLUListElement>("#list")!;
-  const proc = root.querySelector<HTMLElement>("#proc")!;
   const status = root.querySelector<HTMLSpanElement>("#status")!;
+  const groupBtn = root.querySelector<HTMLButtonElement>("#group")!;
+  const ungroupBtn = root.querySelector<HTMLButtonElement>("#ungroup")!;
   root.querySelector<HTMLButtonElement>("#open")!.onclick = onOpen;
+  groupBtn.onclick = () => store.groupSelected();
+  ungroupBtn.onclick = () => store.ungroupSelected();
   const setStatus = (t: string) => (status.textContent = t);
 
+  const updateProc = mountProc(root.querySelector("#proc")!, store, setStatus);
+  const updateGeoref = mountGeoref(root.querySelector("#georef")!, store, editor);
+
   const rows = new Map<string, HTMLLIElement>();
+  const meta = new Map<string, HTMLSpanElement>();
+
+  function header(g: Group): HTMLLIElement {
+    const li = document.createElement("li");
+    li.className = "group";
+    li.innerHTML = `<span class="gname"></span><span class="gmeta"></span>`;
+    const name = li.querySelector<HTMLSpanElement>(".gname")!;
+    name.textContent = g.name;
+    name.title = "Click to select the group, double-click to rename";
+    li.onclick = () => store.selectGroup(g.id);
+    name.ondblclick = (e) => {
+      e.stopPropagation();
+      const input = document.createElement("input");
+      input.value = g.name;
+      input.onblur = () => store.renameGroup(g.id, input.value);
+      input.onkeydown = (ev) => {
+        ev.stopPropagation();
+        if (ev.key === "Enter") input.blur();
+        else if (ev.key === "Escape") { input.onblur = null; name.replaceChildren(g.name); }
+      };
+      input.onclick = (ev) => ev.stopPropagation();
+      name.replaceChildren(input);
+      input.select();
+    };
+    meta.set(g.id, li.querySelector<HTMLSpanElement>(".gmeta")!);
+    return li;
+  }
 
   function row(l: ScanLayer): HTMLLIElement {
     const li = document.createElement("li");
+    li.className = "scan";
     li.textContent = l.name;
     li.title = `${l.file.name} — ${l.width}×${l.height}`;
-    li.onclick = () => store.setActive(l.id);
+    li.onclick = (e) => store.select(l.id, e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "only");
     rows.set(l.id, li);
     return li;
   }
 
   function render() {
     rows.clear();
-    list.replaceChildren(...store.layers.map(row));
+    meta.clear();
+    const items: HTMLElement[] = [];
+    for (const g of store.groups) items.push(header(g), ...store.members(g.id).map(row));
+    list.replaceChildren(...items);
     refresh();
   }
 
   function refresh() {
-    for (const [id, li] of rows) li.classList.toggle("active", id === store.activeId);
-    rows.get(store.activeId ?? "")?.scrollIntoView({ block: "nearest" });
-  }
-
-  function renderProc() {
-    const l = store.active;
-    if (!l) { proc.replaceChildren(); return; }
-    proc.innerHTML = `
-      <h3></h3>
-      <label>Median (1 = off) <input id="median" type="number" min="1" max="31" step="2"></label>
-      <label>k-means (0 = off) <input id="k" type="number" min="0" max="64" step="1"></label>
-      <div class="buttons"><button id="run">Preview</button><button id="revert">Revert</button></div>
-      <div id="palette"></div>`;
-    proc.querySelector("h3")!.textContent = l.name;
-    const median = proc.querySelector<HTMLInputElement>("#median")!;
-    const k = proc.querySelector<HTMLInputElement>("#k")!;
-    const run = proc.querySelector<HTMLButtonElement>("#run")!;
-    median.value = String(l.proc.median);
-    k.value = String(l.proc.k);
-
-    run.onclick = async () => {
-      store.setProc(l.id, { median: +median.value, k: +k.value });
-      run.disabled = true;
-      setStatus("processing… (first run loads OpenCV)");
-      try {
-        const r = await cvWorker().process(l.id, l.file, { ...l.proc });
-        store.setDisplay(l.id, URL.createObjectURL(r.blob), r.palette);
-        setStatus(`${l.name}: ${r.ms} ms`);
-      } catch (e) {
-        console.error(e);
-        setStatus("processing failed — see console");
-      } finally {
-        run.disabled = false;
-      }
-    };
-    proc.querySelector<HTMLButtonElement>("#revert")!.onclick = () => store.setDisplay(l.id, null, null);
-
-    const pal = proc.querySelector<HTMLDivElement>("#palette")!;
-    for (const e of l.palette ?? []) {
-      const s = document.createElement("span");
-      s.className = "swatch";
-      s.style.background = `rgb(${e.rgb})`;
-      s.title = `rgb(${e.rgb.join(", ")}) — ${(e.share * 100).toFixed(1)}%`;
-      pal.append(s);
+    for (const l of store.layers) {
+      const li = rows.get(l.id);
+      if (!li) continue;
+      const g = store.group(l.groupId)!;
+      li.classList.toggle("active", l.id === store.activeId);
+      li.classList.toggle("selected", store.selected.has(l.id));
+      li.classList.toggle("done", !!l.applied && sameProc(l.applied, g.proc));
+      li.classList.toggle("stale", !!l.applied && !sameProc(l.applied, g.proc));
     }
+    for (const g of store.groups) {
+      const m = meta.get(g.id);
+      if (!m) continue;
+      const gcps = completeGcps(g).length;
+      m.textContent = `${store.members(g.id).length} scans · ${gcps} GCP${gcps === 1 ? "" : "s"}`;
+    }
+    rows.get(store.activeId ?? "")?.scrollIntoView({ block: "nearest" });
+    groupBtn.disabled = ungroupBtn.disabled = store.selected.size === 0;
   }
 
-  store.subscribe((c, id) => {
-    if (c === "list") { render(); renderProc(); }
-    else if (c === "active") { refresh(); renderProc(); }
-    else if (id === store.activeId) renderProc();
+  store.subscribe((c: Change) => {
+    if (c === "list" || c === "groups") render();
+    else refresh();
+    updateProc();
+    updateGeoref();
   });
 
   return { setStatus };

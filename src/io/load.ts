@@ -1,6 +1,6 @@
 import { readDims, isSupported, TIFF } from "./decode";
 import { decodeWorker } from "../workers";
-import type { LayerStore, ScanLayer } from "../layers/store";
+import { newGroup, type Group, type LayerStore, type ScanLayer } from "../layers/store";
 
 export async function pickFiles(): Promise<File[]> {
   if (window.showDirectoryPicker) {
@@ -22,12 +22,13 @@ export async function pickFiles(): Promise<File[]> {
   });
 }
 
-/** Reads sizes only; TIFFs are decoded later, on demand (see ensureImage). */
+/** Reads sizes only; TIFFs are decoded later, on demand (see ensureImage). All scans start in one group. */
 export async function loadLayers(
   files: File[],
   onProgress?: (done: number, n: number, name: string) => void,
   concurrency = 4,
-): Promise<ScanLayer[]> {
+): Promise<{ layers: ScanLayer[]; groups: Group[] }> {
+  const group = newGroup("Group 1");
   files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   const out: (ScanLayer | null)[] = new Array(files.length).fill(null);
   let next = 0;
@@ -45,9 +46,11 @@ export async function loadLayers(
           file,
           width,
           height,
+          groupId: group.id,
+          order: i,
           url: TIFF.test(file.name) ? null : URL.createObjectURL(file),
           displayUrl: null,
-          proc: { median: 1, k: 0 },
+          applied: null,
           palette: null,
         };
       } catch (e) {
@@ -58,7 +61,7 @@ export async function loadLayers(
   };
 
   await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
-  return out.filter((l): l is ScanLayer => l !== null);
+  return { layers: out.filter((l): l is ScanLayer => l !== null), groups: [group] };
 }
 
 const pending = new Map<string, Promise<void>>();

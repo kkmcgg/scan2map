@@ -4,6 +4,7 @@ import { LayerStore } from "./layers/store";
 import { pickFiles, loadLayers, ensureImage } from "./io/load";
 import { restore, autosave } from "./io/persist";
 import { ScanView } from "./view/scanView";
+import { GcpEditor } from "./view/gcpEditor";
 import { mountPanel } from "./ui/panel";
 import { cvWorker, gdalWorker, cvWorkerIfStarted } from "./workers";
 
@@ -13,12 +14,14 @@ app.innerHTML = `<aside id="panel"></aside><main id="view"></main>`;
 const store = new LayerStore();
 const scanView = new ScanView(document.getElementById("view")!, store);
 
-const panel = mountPanel(document.getElementById("panel")!, store, async () => {
+const gcpEditor = new GcpEditor(scanView, store);
+
+const panel = mountPanel(document.getElementById("panel")!, store, gcpEditor, async () => {
   try {
     const files = await pickFiles();
     if (!files.length) return;
-    const layers = await loadLayers(files, (d, n, name) => panel.setStatus(`loading ${d}/${n}: ${name}`));
-    store.set(layers);
+    const { layers, groups } = await loadLayers(files, (d, n, name) => panel.setStatus(`loading ${d}/${n}: ${name}`));
+    store.set(layers, groups);
     cvWorkerIfStarted()?.clear();
     panel.setStatus(`${layers.length} layer${layers.length === 1 ? "" : "s"}`);
   } catch (e) {
@@ -33,7 +36,7 @@ const panel = mountPanel(document.getElementById("panel")!, store, async () => {
   try {
     const saved = await restore();
     if (saved) {
-      store.set(saved.layers, saved.activeId);
+      store.set(saved.layers, saved.groups, saved.activeId);
       if (saved.view) {
         const v = scanView.map.getView();
         v.setCenter(saved.view.center);
@@ -49,7 +52,7 @@ const panel = mountPanel(document.getElementById("panel")!, store, async () => {
 
 // decode the active scan (TIFFs are lazy) and its neighbours so switching is instant
 store.subscribe((c) => {
-  if (c === "image") return;
+  if (c !== "list" && c !== "active") return;
   const i = store.layers.findIndex((l) => l.id === store.activeId);
   const l = store.layers[i];
   if (!l) return;
