@@ -11,7 +11,7 @@ import Point from "ol/geom/Point";
 import Translate from "ol/interaction/Translate";
 import { fromLonLat } from "ol/proj";
 import { defaults as defaultControls } from "ol/control/defaults";
-import { shownUrl, type LayerStore, type ScanLayer } from "../layers/store";
+import { placedGcps, shownUrl, type LayerStore, type ScanLayer } from "../layers/store";
 import { fromRef, toRef, crsKnown } from "../geo/crs";
 import { fitLayer } from "../geo/transform";
 import { ensureImage } from "../io/load";
@@ -83,28 +83,26 @@ export class RefMap {
       try { localStorage.setItem(VIEW_KEY, JSON.stringify({ center: v.getCenter(), zoom: v.getZoom() })); } catch { /* optional */ }
     });
 
-    // click = position the pending GCP
+    // click = position the pending GCP (a shared, group-level real-world position)
     this.map.on("singleclick", (e) => {
-      const l = store.active;
       const g = store.activeGroup;
       const id = editor.pendingId;
-      if (!l || !g || !id) return;
+      if (!g || !id) return;
       const w = fromRef(g.srcSrs, e.coordinate[0], e.coordinate[1]);
       if (!w) return this.onMessage?.(`CRS "${g.srcSrs}" isn't known yet — check the GCP CRS field`);
-      store.updateGcp(l.id, id, { x: w[0], y: w[1] });
+      store.setGcpPos(g.id, id, { x: w[0], y: w[1] });
       editor.setPending(null);
     });
 
     const translate = new Translate({ layers: [points] });
     this.map.addInteraction(translate);
     translate.on("translateend", (e) => {
-      const l = store.active;
       const g = store.activeGroup;
-      if (!l || !g) return;
+      if (!g) return;
       for (const f of e.features.getArray() as Feature<Point>[]) {
         const [X, Y] = f.getGeometry()!.getCoordinates();
         const w = fromRef(g.srcSrs, X, Y);
-        if (w) store.updateGcp(l.id, f.getId() as string, { x: w[0], y: w[1] });
+        if (w) store.setGcpPos(g.id, f.getId() as string, { x: w[0], y: w[1] });
       }
     });
 
@@ -175,10 +173,9 @@ export class RefMap {
 
   /** centre the basemap on a GCP's real-world position (opens the basemap if it is hidden) */
   find(id: string) {
-    const l = this.store.active;
     const g = this.store.activeGroup;
-    const p = l?.gcps.find((p) => p.id === id);
-    if (!l || !g || !p) return;
+    const p = g?.gcps.find((p) => p.id === id);
+    if (!g || !p) return;
     if (p.x === null || p.y === null) return this.onMessage?.("that point has no world position yet — click the basemap to place it");
     const w = toRef(g.srcSrs, p.x, p.y);
     if (!w) return this.onMessage?.(`CRS "${g.srcSrs}" isn't known yet — check the GCP CRS field`);
@@ -203,13 +200,12 @@ export class RefMap {
 
   // ---- markers ----
 
-  /** the active layer's points that already have world coordinates, on the basemap */
+  /** the active group's points that already have world coordinates, on the basemap (shared by every scan in it) */
   private sync() {
-    const l = this.store.active;
     const g = this.store.activeGroup;
     this.points.clear();
-    if (l && g && crsKnown(g.srcSrs)) {
-      l.gcps.forEach((p, i) => {
+    if (g && crsKnown(g.srcSrs)) {
+      g.gcps.forEach((p, i) => {
         if (p.x === null || p.y === null) return;
         const w = toRef(g.srcSrs, p.x, p.y);
         if (!w) return;
@@ -233,7 +229,7 @@ export class RefMap {
   private mesh(l: ScanLayer): Mesh | null {
     const g = this.store.group(l.groupId);
     if (!g) return null;
-    const sig = [l.width, l.height, g.method, g.srcSrs, ...l.gcps.map((p) => `${p.col},${p.row},${p.x},${p.y}`)].join("|");
+    const sig = [l.width, l.height, g.method, g.srcSrs, ...placedGcps(l, g).map((p) => `${p.id},${p.col},${p.row},${p.x},${p.y}`)].join("|");
     const have = this.meshes.get(l.id);
     if (have?.sig === sig) return have;
 

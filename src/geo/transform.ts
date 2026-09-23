@@ -1,4 +1,4 @@
-import { MIN_GCPS, completeGcps, type Group, type Method, type ScanLayer } from "../layers/store";
+import { MIN_GCPS, placedGcps, type Group, type Method, type ScanLayer } from "../layers/store";
 
 export type Order = 1 | 2 | 3;
 
@@ -107,7 +107,7 @@ export interface LayerFit {
 
 /** the transform for a layer's GCPs using its group's method (TPS is only previewed as an affine) */
 export function fitLayer(l: ScanLayer, g: Group): LayerFit {
-  const pts = completeGcps(l) as { id: string; col: number; row: number; x: number; y: number }[];
+  const pts = placedGcps(l, g);
   const order = ORDER[g.method];
   const f = fit(pts, order);
   const need = g.method === "tps" ? MIN_GCPS.tps : NTERMS[order];

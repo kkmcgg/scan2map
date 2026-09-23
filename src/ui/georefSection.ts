@@ -1,4 +1,4 @@
-import { MIN_GCPS, completeGcps, type LayerStore, type Method } from "../layers/store";
+import { MIN_GCPS, placedGcps, type LayerStore, type Method } from "../layers/store";
 import { crsKnown, resolveCrs } from "../geo/crs";
 import { fitLayer } from "../geo/transform";
 import type { GcpEditor } from "../view/gcpEditor";
@@ -50,22 +50,29 @@ export function mountGeoref(root: HTMLElement, store: LayerStore, editor: GcpEdi
     $("#add").onclick = () => editor.setAdding(!editor.adding);
   }
 
+  /** one row per GCP identity in the group; "on this scan" toggles whether it's placed on the active scan */
   function buildList() {
-    const l = store.active!;
+    const g = store.activeGroup!;
     $("#gcps").replaceChildren(
-      ...l.gcps.map((p, i) => {
+      ...g.gcps.map((p, i) => {
         const el = document.createElement("div");
         el.className = "gcp";
         el.innerHTML = `
           <div class="gcp-head" title="Click to re-place this point on the reference map">
-            <span>#${i + 1}</span><span class="px"></span><span class="err"></span><button class="find" title="Find this point on the scan and the map">⌖</button><button class="rm" title="Remove">×</button>
+            <span>#${i + 1}</span><span class="px"></span><span class="err"></span><button class="here"></button><button class="find" title="Find this point on the scan and the map">⌖</button><button class="rm" title="Delete this GCP from every scan">×</button>
           </div>
           <div class="gcp-xy"><input class="x" type="text" inputmode="decimal" placeholder="x / lon"><input class="y" type="text" inputmode="decimal" placeholder="y / lat"></div>`;
         el.querySelector<HTMLElement>(".gcp-head")!.onclick = () => { editor.focus(p.id); editor.setPending(p.id); };
+        el.querySelector<HTMLButtonElement>(".here")!.onclick = (e) => {
+          e.stopPropagation();
+          const l = store.active!;
+          if (l.gcpPx.some((x) => x.gcpId === p.id)) store.unplaceGcp(l.id, p.id);
+          else store.placeGcpDefault(l.id, p.id);
+        };
         el.querySelector<HTMLButtonElement>(".find")!.onclick = (e) => { e.stopPropagation(); editor.focus(p.id); ref.find(p.id); };
-        el.querySelector<HTMLButtonElement>(".rm")!.onclick = (e) => { e.stopPropagation(); store.removeGcp(l.id, p.id); };
-        el.querySelector<HTMLInputElement>(".x")!.onchange = (e) => store.updateGcp(l.id, p.id, { x: num((e.target as HTMLInputElement).value) });
-        el.querySelector<HTMLInputElement>(".y")!.onchange = (e) => store.updateGcp(l.id, p.id, { y: num((e.target as HTMLInputElement).value) });
+        el.querySelector<HTMLButtonElement>(".rm")!.onclick = (e) => { e.stopPropagation(); store.removeGcp(g.id, p.id); };
+        el.querySelector<HTMLInputElement>(".x")!.onchange = (e) => store.setGcpPos(g.id, p.id, { x: num((e.target as HTMLInputElement).value) });
+        el.querySelector<HTMLInputElement>(".y")!.onchange = (e) => store.setGcpPos(g.id, p.id, { y: num((e.target as HTMLInputElement).value) });
         return el;
       }),
     );
@@ -110,20 +117,24 @@ export function mountGeoref(root: HTMLElement, store: LayerStore, editor: GcpEdi
       : editor.adding
         ? "Click a recognisable spot on the scan."
         : ref.open
-          ? "Add GCP, click a spot on the scan, then the same spot on the map."
+          ? "Add GCP, click a spot on the scan, then the same spot on the map — it's seeded at the same spot on every scan in the group, so switch scans and drag each one onto its exact position."
           : "Open the reference map to pair each scan point with its real-world position.";
 
-    // rebuild the rows only when points were added/removed, so typing isn't interrupted
-    const lk = l.gcps.map((p) => p.id).join();
+    // rebuild the rows only when GCPs were added/removed, so typing isn't interrupted
+    const lk = g.gcps.map((p) => p.id).join();
     if (lk !== listKey) { listKey = lk; buildList(); }
     const { fit, note } = fitLayer(l, g);
     const err = new Map(fit?.residuals.map((r) => [r.id, r.err]));
     const px = fit ? (fit.pixelSize[0] + fit.pixelSize[1]) / 2 : 0;
-    l.gcps.forEach((p, i) => {
+    g.gcps.forEach((p, i) => {
       const el = $("#gcps").children[i] as HTMLElement;
+      const placement = l.gcpPx.find((x) => x.gcpId === p.id);
       el.classList.toggle("pending", p.id === editor.pendingId);
-      el.querySelector<HTMLElement>(".px")!.textContent = `px ${p.col.toFixed(0)}, ${p.row.toFixed(0)}`;
-      const e = err.get(p.id);
+      const here = el.querySelector<HTMLButtonElement>(".here")!;
+      here.textContent = placement ? "Remove from this scan" : "Add to this scan";
+      here.title = placement ? "Remove this point from the current scan (it stays on any other scan that has it)" : "Place this point on the current scan, guessing its position from another scan";
+      el.querySelector<HTMLElement>(".px")!.textContent = placement ? `px ${placement.col.toFixed(0)}, ${placement.row.toFixed(0)}` : "not on this scan";
+      const e = placement ? err.get(p.id) : undefined;
       el.querySelector<HTMLElement>(".err")!.textContent = e === undefined ? "" : `${sig(e / px)} px`;
       const x = el.querySelector<HTMLInputElement>(".x")!;
       const y = el.querySelector<HTMLInputElement>(".y")!;
@@ -131,10 +142,10 @@ export function mountGeoref(root: HTMLElement, store: LayerStore, editor: GcpEdi
       if (document.activeElement !== y) y.value = p.y === null ? "" : String(p.y);
     });
 
-    const have = completeGcps(l).length;
+    const have = placedGcps(l, g).length;
     const need = MIN_GCPS[g.method];
     const n = $("#need");
-    n.textContent = `${have} of ${l.gcps.length} points paired — ${have >= need ? "enough" : `need ${need}`} for ${g.method}`;
+    n.textContent = `${have} of ${g.gcps.length} points on this scan — ${have >= need ? "enough" : `need ${need}`} for ${g.method}`;
     n.classList.toggle("ok", have >= need);
 
     const out = $("#fit");

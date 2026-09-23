@@ -49,7 +49,7 @@ export async function loadLayers(
           groupId: group.id,
           order: i,
           hidden: false,
-          gcps: [],
+          gcpPx: [],
           url: TIFF.test(file.name) ? null : URL.createObjectURL(file),
           displayUrl: null,
           applied: null,

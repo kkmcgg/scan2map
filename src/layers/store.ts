@@ -4,15 +4,22 @@ export interface PaletteEntry { rgb: [number, number, number]; share: number }
 export type Method = "poly1" | "poly2" | "poly3" | "tps";
 export const MIN_GCPS: Record<Method, number> = { poly1: 3, poly2: 6, poly3: 10, tps: 3 };
 
-/** col/row are pixel/line in the layer, (0,0) = top-left corner; x/y are in the group's GCP CRS (null until known) */
-export interface Gcp { id: string; col: number; row: number; x: number | null; y: number | null }
+/**
+ * A control point identity, shared by every scan in the group: many scans, one real-world place.
+ * x/y are in the group's GCP CRS (null until known) and apply no matter which scan(s) the point is placed on.
+ */
+export interface Gcp { id: string; x: number | null; y: number | null }
+
+/** Where one of the group's GCPs sits on this particular scan's pixel grid, (0,0) = top-left corner. */
+export interface GcpPlacement { gcpId: string; col: number; row: number }
 
 /** Where one scan sits inside a stitched mosaic image. */
 export interface Cell { id: string; x: number; y: number; w: number; h: number }
 export interface Mosaic { layerId: string; cols: number; cells: Cell[] }
 
 /**
- * A group shares one processing chain and one CRS/warp method. GCPs belong to each layer.
+ * A group shares one processing chain, one CRS/warp method, and one set of GCP identities: each GCP has a
+ * single real-world position but can be placed at a different pixel position on each of the group's scans.
  * A collapsed group hides its scans and shows one stitched mosaic layer instead.
  */
 export interface Group {
@@ -23,6 +30,7 @@ export interface Group {
   dstSrs: string; // output CRS
   method: Method;
   mosaic: Mosaic | null;
+  gcps: Gcp[]; // control point identities shared by every scan in the group
 }
 
 export interface ScanLayer {
@@ -34,7 +42,7 @@ export interface ScanLayer {
   groupId: string;
   order: number; // position in the folder listing, so ungrouping restores name order
   hidden: boolean; // a scan folded into its group's mosaic
-  gcps: Gcp[];
+  gcpPx: GcpPlacement[]; // this scan's pixel position for each of its group's GCPs it has been placed on
   url: string | null; // original, browser-displayable; null until a TIFF has been decoded
   displayUrl: string | null; // processed preview; null = show the original
   applied: ProcParams | null; // the chain displayUrl was made with
@@ -44,14 +52,31 @@ export interface ScanLayer {
 /**
  * list = layers/groups replaced, groups = membership/names/mosaics changed (id = a new group to name),
  * active/select = selection, image = an image url changed, settings = a group's chain/CRS/method changed (id = group),
- * gcps = a layer's control points changed (id = layer)
+ * gcps = a group's control points or a scan's placements of them changed (id = group or layer)
  */
 export type Change = "list" | "groups" | "active" | "select" | "image" | "settings" | "gcps";
 type Listener = (change: Change, id?: string) => void;
 
 export const shownUrl = (l: ScanLayer) => l.displayUrl ?? l.url;
 export const sameProc = (a: ProcParams, b: ProcParams) => a.median === b.median && a.k === b.k;
-export const completeGcps = (l: ScanLayer) => l.gcps.filter((p) => p.x !== null && p.y !== null);
+
+export interface PlacedGcp { id: string; col: number; row: number; x: number; y: number }
+/** this scan's GCPs that are both placed on it and have a known real-world position, ready to fit a transform */
+export function placedGcps(l: ScanLayer, g: Group): PlacedGcp[] {
+  const at = new Map(g.gcps.map((p) => [p.id, p]));
+  const out: PlacedGcp[] = [];
+  for (const px of l.gcpPx) {
+    const p = at.get(px.gcpId);
+    if (p && p.x !== null && p.y !== null) out.push({ id: p.id, col: px.col, row: px.row, x: p.x, y: p.y });
+  }
+  return out;
+}
+
+/** the group's GCPs that at least one of the given layers has placed, in the group's original order */
+function usedGcps(layers: ScanLayer[], pool: Gcp[]): Gcp[] {
+  const ids = new Set(layers.flatMap((l) => l.gcpPx.map((p) => p.gcpId)));
+  return pool.filter((p) => ids.has(p.id)).map((p) => ({ ...p }));
+}
 
 export function newGroup(name: string, from?: Group): Group {
   return {
@@ -62,6 +87,7 @@ export function newGroup(name: string, from?: Group): Group {
     dstSrs: from?.dstSrs ?? "EPSG:2961",
     method: from?.method ?? "poly1",
     mosaic: null,
+    gcps: [],
   };
 }
 
@@ -180,9 +206,12 @@ export class LayerStore {
     const moving = this.shown.filter((l) => this.selected.has(l.id) && !this.isMosaic(l));
     if (!moving.length) return;
     const src = this.group(moving[0].groupId)!;
+    const sources = [...new Set(moving.map((l) => l.groupId))].map((id) => this.group(id)!);
     const g = newGroup(`Group ${++this.groupSeq}`, src);
+    g.gcps = usedGcps(moving, sources.flatMap((s) => s.gcps));
     this.groups.splice(this.groups.indexOf(src) + 1, 0, g);
     moving.forEach((l) => (l.groupId = g.id));
+    for (const s of sources) s.gcps = usedGcps(this.members(s.id), s.gcps); // drop identities no scan of the source group uses any more
     this.afterRegroup(g.id);
   }
 
@@ -192,8 +221,10 @@ export class LayerStore {
       const src = this.group(l.groupId)!;
       if (this.members(src.id).length === 1) continue;
       const g = newGroup(`Group ${++this.groupSeq}`, src);
+      g.gcps = usedGcps([l], src.gcps);
       this.groups.splice(this.groups.indexOf(src) + 1, 0, g);
       l.groupId = g.id;
+      src.gcps = usedGcps(this.members(src.id), src.gcps);
     }
     this.afterRegroup();
   }
@@ -213,17 +244,21 @@ export class LayerStore {
 
   // ---- mosaics ----
 
-  /** hide the group's scans behind one stitched layer; their GCPs move onto it (shifted into mosaic pixels) */
+  /** hide the group's scans behind one stitched layer; their placements move onto it (shifted into mosaic pixels) */
   collapseGroup(groupId: string, mosaic: ScanLayer, cells: Cell[], cols: number) {
     const g = this.group(groupId);
     if (!g || g.mosaic) return;
     const at = new Map(cells.map((c) => [c.id, c]));
+    const placed = new Set<string>();
     let order = Infinity;
     for (const l of this.layers) {
       const c = at.get(l.id);
       if (!c) continue;
-      mosaic.gcps.push(...l.gcps.map((p) => ({ ...p, col: p.col + c.x, row: p.row + c.y })));
-      l.gcps = [];
+      for (const p of l.gcpPx) {
+        // the same GCP placed on more than one source scan (overlapping coverage): keep the first placement
+        if (!placed.has(p.gcpId)) { placed.add(p.gcpId); mosaic.gcpPx.push({ gcpId: p.gcpId, col: p.col + c.x, row: p.row + c.y }); }
+      }
+      l.gcpPx = [];
       l.hidden = true;
       order = Math.min(order, l.order);
     }
@@ -237,20 +272,20 @@ export class LayerStore {
     this.emit("groups");
   }
 
-  /** drop the mosaic and bring the scans back; GCPs go back to the scan they fall in */
+  /** drop the mosaic and bring the scans back; placements go back to the scan they fall in */
   expandGroup(groupId: string) {
     const g = this.group(groupId);
     const m = g?.mosaic;
     if (!g || !m) return;
     const ml = this.find(m.layerId);
     if (ml) {
-      for (const p of ml.gcps) {
+      for (const p of ml.gcpPx) {
         const c = m.cells.find((c) => p.col >= c.x && p.col < c.x + c.w && p.row >= c.y && p.row < c.y + c.h);
         const l = c && this.find(c.id);
         if (!c || !l) continue;
         const col = p.col - c.x;
         const row = p.row - c.y;
-        if (col < l.width && row < l.height) l.gcps.push({ ...p, col, row });
+        if (col < l.width && row < l.height) l.gcpPx.push({ gcpId: p.gcpId, col, row });
       }
       if (ml.url) URL.revokeObjectURL(ml.url);
       if (ml.displayUrl) URL.revokeObjectURL(ml.displayUrl);
@@ -282,29 +317,67 @@ export class LayerStore {
     this.emit("settings", groupId);
   }
 
-  // ---- control points (per layer) ----
+  // ---- control points (identity shared by the group, placement per scan) ----
 
-  addGcp(layerId: string, p: { col: number; row: number; x?: number; y?: number }) {
+  /**
+   * Create a new GCP identity in the layer's group, and place it at the SAME pixel position on every
+   * (visible) scan in the group — scans are assumed to be roughly registered with each other already, so
+   * this is normally a good starting guess. The user drags each scan's copy to its actual position after.
+   */
+  addGcp(layerId: string, p: { col: number; row: number }) {
     const l = this.find(layerId);
-    if (!l) return null;
+    const g = l && this.group(l.groupId);
+    if (!l || !g) return null;
     const id = crypto.randomUUID();
-    l.gcps.push({ id, col: p.col, row: p.row, x: p.x ?? null, y: p.y ?? null });
+    g.gcps.push({ id, x: null, y: null });
+    for (const m of this.members(g.id)) m.gcpPx.push({ gcpId: id, col: p.col, row: p.row });
     this.emit("gcps", layerId);
     return id;
   }
 
-  updateGcp(layerId: string, id: string, patch: Partial<Omit<Gcp, "id">>) {
-    const p = this.find(layerId)?.gcps.find((p) => p.id === id);
-    if (!p) return;
-    Object.assign(p, patch);
+  /** place an existing GCP on this scan, or move it if it's already placed there */
+  placeGcp(layerId: string, gcpId: string, col: number, row: number) {
+    const l = this.find(layerId);
+    if (!l) return;
+    const px = l.gcpPx.find((p) => p.gcpId === gcpId);
+    if (px) Object.assign(px, { col, row });
+    else l.gcpPx.push({ gcpId, col, row });
     this.emit("gcps", layerId);
   }
 
-  removeGcp(layerId: string, id: string) {
+  /** place a GCP back onto a scan that's missing it, guessing its position from another scan that has it (or the scan's centre) */
+  placeGcpDefault(layerId: string, gcpId: string) {
+    const l = this.find(layerId);
+    if (!l || l.gcpPx.some((p) => p.gcpId === gcpId)) return;
+    const like = this.members(l.groupId)
+      .flatMap((m) => m.gcpPx)
+      .find((p) => p.gcpId === gcpId);
+    this.placeGcp(layerId, gcpId, like?.col ?? l.width / 2, like?.row ?? l.height / 2);
+  }
+
+  /** remove this GCP from just this scan; the identity (and any placement on other scans) is untouched */
+  unplaceGcp(layerId: string, gcpId: string) {
     const l = this.find(layerId);
     if (!l) return;
-    l.gcps = l.gcps.filter((p) => p.id !== id);
+    l.gcpPx = l.gcpPx.filter((p) => p.gcpId !== gcpId);
     this.emit("gcps", layerId);
+  }
+
+  /** set a GCP's shared real-world position, used by every scan that has it placed */
+  setGcpPos(groupId: string, id: string, patch: Partial<Pick<Gcp, "x" | "y">>) {
+    const p = this.group(groupId)?.gcps.find((p) => p.id === id);
+    if (!p) return;
+    Object.assign(p, patch);
+    this.emit("gcps", groupId);
+  }
+
+  /** delete a GCP identity outright: its position and its placement on every scan in the group */
+  removeGcp(groupId: string, id: string) {
+    const g = this.group(groupId);
+    if (!g) return;
+    g.gcps = g.gcps.filter((p) => p.id !== id);
+    for (const l of this.layers) if (l.groupId === groupId) l.gcpPx = l.gcpPx.filter((p) => p.gcpId !== id);
+    this.emit("gcps", groupId);
   }
 
   // ---- images ----

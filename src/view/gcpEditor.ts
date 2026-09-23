@@ -23,9 +23,12 @@ export function gcpStyle(f: FeatureLike, selectedId: string | null, pendingId: s
 }
 
 /**
- * Places and moves the active layer's GCPs on the scan.
- * Workflow: click the scan (a point is created and becomes "pending"), then click the matching place
- * on the reference map, which fills in its world coordinates.
+ * Places and moves the active layer's GCPs on the scan. A GCP's real-world position is shared by its whole
+ * group; each scan has its own pixel placement of it, but adding a new GCP seeds that same pixel position
+ * onto every scan in the group at once (scans are assumed to be roughly aligned already) — dragging a point
+ * on one scan only nudges that scan's copy to its exact spot.
+ * Workflow: click the scan ("+ Add GCP", becomes "pending"), then click the matching place on the reference
+ * map, which fills in its world coordinates.
  */
 export class GcpEditor {
   adding = false;
@@ -46,7 +49,7 @@ export class GcpEditor {
       if (!l) return;
       for (const f of e.features.getArray() as Feature<Point>[]) {
         const [px, py] = f.getGeometry()!.getCoordinates();
-        store.updateGcp(l.id, f.getId() as string, { col: px, row: view.stackH - py });
+        store.placeGcp(l.id, f.getId() as string, px, view.stackH - py);
       }
     });
 
@@ -93,7 +96,7 @@ export class GcpEditor {
     this.notify();
   }
 
-  /** highlight a GCP and bring it into view on the scan */
+  /** highlight a GCP and bring it into view on the scan (only if it's placed on the active one) */
   focus(id: string) {
     this.selectedId = id;
     const f = this.source.getFeatureById(id);
@@ -103,12 +106,15 @@ export class GcpEditor {
 
   private sync() {
     const l = this.store.active;
+    const g = this.store.activeGroup;
     this.source.clear();
-    if (l) {
+    if (l && g) {
+      const numOf = new Map(g.gcps.map((p, i) => [p.id, i + 1]));
+      const known = new Map(g.gcps.map((p) => [p.id, p.x !== null && p.y !== null]));
       this.source.addFeatures(
-        l.gcps.map((p, i) => {
-          const f = new Feature({ geometry: new Point([p.col, this.view.stackH - p.row]), n: i + 1, ok: p.x !== null && p.y !== null });
-          f.setId(p.id);
+        l.gcpPx.map((px) => {
+          const f = new Feature({ geometry: new Point([px.col, this.view.stackH - px.row]), n: numOf.get(px.gcpId) ?? "?", ok: known.get(px.gcpId) ?? false });
+          f.setId(px.gcpId);
           return f;
         }),
       );

@@ -35,7 +35,7 @@ export function mountMosaic(root: HTMLElement, store: LayerStore, setStatus: (t:
         groupId,
         order: 0,
         hidden: false,
-        gcps: [],
+        gcpPx: [],
         url: URL.createObjectURL(file),
         displayUrl: null,
         applied: null,

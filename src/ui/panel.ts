@@ -1,4 +1,4 @@
-import { sameProc, completeGcps, type Change, type Group, type LayerStore, type ScanLayer } from "../layers/store";
+import { sameProc, placedGcps, type Change, type Group, type LayerStore, type ScanLayer } from "../layers/store";
 import type { GcpEditor } from "../view/gcpEditor";
 import type { RefMap } from "../view/refMap";
 import { mountProc } from "./procSection";
@@ -110,7 +110,7 @@ export function mountPanel(root: HTMLElement, store: LayerStore, editor: GcpEdit
       const m = meta.get(g.id);
       if (!m) continue;
       const members = store.members(g.id);
-      const gcps = members.reduce((n, l) => n + completeGcps(l).length, 0);
+      const gcps = members.reduce((n, l) => n + placedGcps(l, g).length, 0);
       m.textContent = `${g.mosaic ? "mosaic of " + g.mosaic.cells.length : members.length + " scans"} · ${gcps} GCP${gcps === 1 ? "" : "s"}`;
     }
     rows.get(store.activeId ?? "")?.scrollIntoView({ block: "nearest" });
